@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="sr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evidencija tablica</title>
+<style>
+:root{--bg:#f5f5f7;--card:#fff;--tx:#1c1c1e;--mut:#6b6b70;--ac:#0a66d6;--bd:#dcdce0}
+@media (prefers-color-scheme:dark){:root{--bg:#111214;--card:#1c1d20;--tx:#f2f2f4;--mut:#9a9aa2;--ac:#4c9aff;--bd:#2d2e33}}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--tx);padding:12px;max-width:720px;margin:auto}
+video{width:100%;max-height:45vh;background:#000;border-radius:12px;object-fit:cover}
+.bar{display:flex;gap:8px;align-items:center;margin:12px 0;flex-wrap:wrap}
+.count{flex:1;font-size:22px;font-weight:700}
+button{background:var(--ac);color:#fff;border:0;border-radius:10px;padding:10px 14px;font-size:15px}
+button.sec{background:var(--card);color:var(--tx);border:1px solid var(--bd)}
+#status{color:var(--mut);font-size:13px;margin-bottom:8px}
+ul{list-style:none;margin:0;padding:0;background:var(--card);border-radius:12px;border:1px solid var(--bd)}
+li{display:flex;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--bd)}
+li:last-child{border:0}
+li b{letter-spacing:1px}li span{color:var(--mut);font-size:14px}
+</style>
+</head>
+<body>
+<video id="v" autoplay playsinline muted></video>
+<div class="bar">
+  <div class="count" id="count">Ukupno: 0</div>
+  <button id="toggle">Start</button>
+  <button class="sec" id="csv">CSV</button>
+  <button class="sec" id="clear">Obriši</button>
+</div>
+<div id="status">Pritisni Start i dozvoli kameru.</div>
+<ul id="list"></ul>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script>
+const COOLDOWN = 5*60*1000, CONFIRM = 2, INTERVAL = 800;
+// Srpske tablice: BG 123-AB / BG 1234-AB (menjaj po potrebi)
+const RX = /[A-Z]{2}\s?-?\d{3,4}\s?-?[A-Z]{2}/g;
+
+const $ = id => document.getElementById(id);
+let items = [], lastSeen = {}, cand = {}, worker, running = false, busy = false, timer;
+
+try { items = JSON.parse(localStorage.getItem('plates') || '[]'); } catch(e){}
+const save = () => { try { localStorage.setItem('plates', JSON.stringify(items)); } catch(e){} };
+
+function pretty(p){ const m = p.match(/^([A-Z]{2})(\d{3,4})([A-Z]{2})$/); return m ? `${m[1]} ${m[2]}-${m[3]}` : p; }
+function fmt(t){ return new Date(t).toLocaleString('sr-RS'); }
+
+function render(){
+  $('count').textContent = 'Ukupno: ' + items.length;
+  $('list').innerHTML = items.map(i => `<li><b>${pretty(i.plate)}</b><span>${fmt(i.t)}</span></li>`).join('');
+}
+
+async function start(){
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}, audio:false});
+    $('v').srcObject = stream;
+  } catch(e){ $('status').textContent = 'Kamera nije dostupna (potreban je HTTPS ili localhost).'; return; }
+  if(!worker){
+    $('status').textContent = 'Učitavam OCR...';
+    worker = await Tesseract.createWorker('eng');
+    await worker.setParameters({tessedit_char_whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- '});
+  }
+  running = true; $('toggle').textContent = 'Stop'; $('status').textContent = 'Skeniram...';
+  timer = setInterval(scan, INTERVAL);
+}
+function stop(){
+  running = false; clearInterval(timer); $('toggle').textContent = 'Start'; $('status').textContent = 'Zaustavljeno.';
+  const s = $('v').srcObject; if(s) s.getTracks().forEach(t => t.stop());
+}
+
+async function scan(){
+  const v = $('v'); if(busy || !v.videoWidth) return;
+  busy = true;
+  try {
+    const c = document.createElement('canvas');
+    c.width = v.videoWidth; c.height = v.videoHeight;
+    const g = c.getContext('2d'); g.filter = 'grayscale(1) contrast(1.4)'; g.drawImage(v,0,0);
+    const { data:{ text } } = await worker.recognize(c);
+    handle(text);
+  } catch(e){ console.error(e); }
+  busy = false;
+}
+
+function handle(raw){
+  const now = Date.now();
+  const found = new Set((raw.toUpperCase().match(RX) || []).map(s => s.replace(/[\s-]/g,'')));
+  Object.keys(cand).forEach(k => { if(!found.has(k)) delete cand[k]; });
+  for(const p of found){
+    if(lastSeen[p] && now - lastSeen[p] < COOLDOWN){ lastSeen[p] = now; continue; }
+    cand[p] = (cand[p] || 0) + 1;
+    if(cand[p] >= CONFIRM){
+      delete cand[p]; lastSeen[p] = now;
+      items.unshift({plate:p, t:now}); save(); render();
+    }
+  }
+}
+
+$('toggle').onclick = () => running ? stop() : start();
+$('clear').onclick = () => { if(confirm('Obrisati celu listu?')){ items=[]; lastSeen={}; cand={}; save(); render(); } };
+$('csv').onclick = () => {
+  const rows = ['tablica,vreme', ...items.map(i => `${pretty(i.plate)},${fmt(i.t)}`)].join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['\ufeff'+rows], {type:'text/csv'}));
+  a.download = 'tablice.csv'; a.click();
+};
+render();
+</script>
+</body>
+</html>
